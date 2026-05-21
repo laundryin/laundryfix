@@ -1,5 +1,49 @@
 <?php 
 include 'koneksi.php'; 
+// Load PHPMailer Manual jalur kuli
+require 'PHPMailer/src/Exception.php';
+require 'PHPMailer/src/PHPMailer.php';
+require 'PHPMailer/src/SMTP.php';
+
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\Exception;
+
+// Fungsi Terbilang titipan dosen lu
+function terbilang($x){
+    $abil = array("", "Satu", "Dua", "Tiga", "Empat", "Lima", "Enam", "Tujuh", "Delapan", "Sembilan", "Sepuluh", "Sebelas");
+    if ($x < 12) return " " . $abil[$x];
+    elseif ($x < 20) return terbilang($x - 10) . " Belas"; 
+    elseif ($x < 100) return terbilang($x / 10) . " Puluh" . terbilang($x % 10);
+    elseif ($x < 200) return " Seratus" . terbilang($x - 100);
+    elseif ($x < 1000) return terbilang($x / 100) . " Ratus" . terbilang($x % 100);
+    elseif ($x < 2000) return " Seribu" . terbilang($x - 1000);
+    elseif ($x < 1000000) return terbilang($x / 1000) . " Ribu" . terbilang($x % 1000);
+    elseif ($x < 1000000000) return terbilang($x / 1000000) . " Juta" . terbilang($x % 1000000);
+}
+
+// Fungsi Helper Kirim Email
+function kirimEmailNotif($email_tujuan, $nama_pelanggan, $subject, $body_html) {
+    $mail = new PHPMailer(true);
+    try {
+        $mail->isSMTP();
+        $mail->Host       = 'smtp.gmail.com';
+        $mail->SMTPAuth   = true;
+        $mail->Username   = 'enduw.laundryin@gmail.com'; 
+        $mail->Password   = 'skthyomekyryixhr'; // JANGAN SAMPE BOCOR NIH PASSWORD
+        $mail->SMTPSecure = PHPMailer::ENCRYPTION_SMTPS;
+        $mail->Port       = 465;
+
+        $mail->setFrom('enduw.laundryin@gmail.com', 'Harum Laundry ERP');
+        $mail->addAddress($email_tujuan, $nama_pelanggan); 
+        $mail->isHTML(true);
+        $mail->Subject = $subject;
+        $mail->Body    = $body_html;
+        $mail->send();
+        return true;
+    } catch (Exception $e) {
+        return false;
+    }
+}
 
 // Tangkap ID yang dilempar dari tambah_pelanggan
 $new_pelanggan_id = isset($_GET['new_id']) ? $_GET['new_id'] : '';
@@ -54,15 +98,88 @@ if(isset($_POST['simpan'])) {
         mysqli_query($conn, "SET FOREIGN_KEY_CHECKS=1;");
 
         if($insert_detail) {
-            echo "<script>alert('Pesanan berhasil dibuat!'); window.location='pesanan.php';</script>";
+            $pesan_alert = "Pesanan berhasil dibuat!";
+            
+            // Cari tau email sama nama pelanggannya dulu bro
+            $email_customer = '';
+            $nama_customer = 'Pelanggan Umum';
+            if($id_pelanggan != "NULL") {
+                // Hapus kutip sementara buat query
+                $id_pel_bersih = str_replace("'", "", $id_pelanggan);
+                $q_pel = mysqli_query($conn, "SELECT nama_pelanggan, email FROM pelanggan WHERE id_pelanggan = '$id_pel_bersih'");
+                if($d_pel = mysqli_fetch_array($q_pel)){
+                    $email_customer = $d_pel['email'];
+                    $nama_customer = $d_pel['nama_pelanggan'] ? $d_pel['nama_pelanggan'] : 'Pelanggan';
+                }
+            }
+
+            $total_format = number_format($subtotal, 0, ',', '.');
+            $terbilang_txt = trim(terbilang($subtotal)) . " Rupiah";
+
+            // ==========================================
+            // TRIGGER 1: KALO LANGSUNG LUNAS
+            // ==========================================
+            if($status_bayar == 'Lunas') {
+                // JURNAL PENJUALAN TUNAI: Kas (1110) bertambah, Pendapatan Jasa (4110) bertambah
+                // Ganti 4110 pake kode akun pendapatan lu kalo beda
+                $ket_jurnal = "Pendapatan Jasa Laundry Tunai (Nota: $no_nota)";
+                mysqli_query($conn, "INSERT INTO jurnal_umum (tanggal_jurnal, no_referensi, tipe_transaksi, keterangan, total_transaksi) VALUES ('$tgl_masuk', '$no_nota', 'Penjualan', '$ket_jurnal', '$subtotal')");
+                $id_jurnal = mysqli_insert_id($conn);
+                
+                mysqli_query($conn, "INSERT INTO detail_jurnal (id_jurnal, kode_akun, posisi, nominal) VALUES ('$id_jurnal', '1110', 'Debit', '$subtotal')");
+                mysqli_query($conn, "INSERT INTO detail_jurnal (id_jurnal, kode_akun, posisi, nominal) VALUES ('$id_jurnal', '4110', 'Kredit', '$subtotal')");
+
+                $pesan_alert .= "\\n- Jurnal Pendapatan Tunai otomatis tercatat.";
+
+                // Kirim Kwitansi
+                if(!empty($email_customer)) {
+                    $subj_lunas = "Kwitansi Pembayaran Resmi - $no_nota";
+                    $body_lunas = "
+                        <div style='font-family: monospace; max-width: 350px; padding: 20px; border: 2px dashed #10b981; background-color: #f0fdf4; color: #064e3b;'>
+                            <div style='text-align: center; margin-bottom: 20px;'>
+                                <h3 style='margin: 0; color: #047857;'>-=KWITANSI LUNAS=-</h3>
+                                <p style='margin: 0;'>HARUM LAUNDRY</p>
+                            </div>
+                            <p style='margin: 5px 0;'>No. Nota : $no_nota</p>
+                            <p style='margin: 5px 0;'>Pelanggan: Kak $nama_customer</p>
+                            <p style='margin: 5px 0;'>Tgl Bayar: " . date('d F Y', strtotime($tgl_masuk)) . "</p>
+                            <hr style='border: 1px dashed #10b981;' />
+                            <h2 style='margin: 10px 0 0 0; color: #059669;'>TELAH DIBAYAR: Rp $total_format</h2>
+                            <p style='margin: 5px 0 15px 0; font-size: 11px; font-style: italic;'>Terbilang: $terbilang_txt</p>
+                            <hr style='border: 1px dashed #10b981;' />
+                            <p style='text-align: center; font-size: 11px;'>Terima kasih udah nyuci di tempat kami!</p>
+                        </div>
+                    ";
+                    if(kirimEmailNotif($email_customer, $nama_customer, $subj_lunas, $body_lunas)){
+                        $pesan_alert .= "\\n- Email kwitansi pelunasan sukses terkirim.";
+                    }
+                }
+            }
+
+            // ==========================================
+            // TRIGGER 2: KALO SELF SERVICE (LANGSUNG SELESAI)
+            // ==========================================
+            if($status_cuc == 'Langsung Selesai' && !empty($email_customer)) {
+                $subj_selesai = "Yeay! Cucian Kamu Udah Selesai - $no_nota";
+                $body_selesai = "
+                    <div style='font-family: sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 10px; max-width: 500px;'>
+                        <h2 style='color: #10b981;'>Cucian Udah Wangi! 🌸</h2>
+                        <p>Halo Kak <b>$nama_customer</b>,</p>
+                        <p>Cucian kamu dengan nomor nota <b>$no_nota</b> udah kelar. Keren kan secepat kilat?</p>
+                        <p>Status Tagihan: <b>$status_bayar</b></p>
+                        <hr>
+                        <p style='font-size: 12px; color: #888;'>Harum Laundry ERP - Sistem Londriin</p>
+                    </div>
+                ";
+                if(kirimEmailNotif($email_customer, $nama_customer, $subj_selesai, $body_selesai)){
+                    $pesan_alert .= "\\n- Email notif cucian selesai sukses terkirim.";
+                }
+            }
+
+            echo "<script>alert('$pesan_alert'); window.location='pesanan.php';</script>";
         } else {
             echo "Gagal simpan detail: " . mysqli_error($conn);
         }
-    } else {
-        mysqli_query($conn, "SET FOREIGN_KEY_CHECKS=1;");
-        echo "Gagal bikin nota: " . mysqli_error($conn);
-    }
-}
 ?>
 <!DOCTYPE html>
 <html lang="id">
